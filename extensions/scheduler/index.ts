@@ -10,6 +10,7 @@ import { Type } from "typebox";
 
 // Keep the scheduler logic testable from plain node --test.
 const core = require("./scheduler-core.cjs");
+const lifecycle = require("./scheduler-lifecycle.cjs");
 
 const ACTIONS = ["notify", "prompt", "shell", "message"] as const;
 const TYPES = ["once", "interval", "cron"] as const;
@@ -123,13 +124,7 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 	const firing = new Set<string>();
 
 	function isSessionActive(ctx: ExtensionContext, generation = sessionGeneration): boolean {
-		if (activeCtx !== ctx || sessionGeneration !== generation) return false;
-		try {
-			ctx.isIdle(); // Pi throws when a captured extension context has become stale.
-			return true;
-		} catch {
-			return false;
-		}
+		return lifecycle.isSessionContextActive(activeCtx, ctx, sessionGeneration, generation);
 	}
 
 	async function loadTasks(): Promise<void> {
@@ -490,7 +485,7 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
-		if (activeCtx !== ctx) return;
+		if (!isSessionActive(ctx)) return;
 		++sessionGeneration;
 		clearTimers();
 		if (ctx.hasUI) {
