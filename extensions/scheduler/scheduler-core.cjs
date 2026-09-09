@@ -544,7 +544,6 @@ function disableScheduledTask(tasks, idOrPrefix, nowValue = new Date()) {
 	task.enabled = false;
 	task.disabledAt = now.toISOString();
 	task.nextRun = undefined;
-	if (task.status === "running") task.status = "pending";
 	return task;
 }
 
@@ -628,6 +627,7 @@ function markScheduledTaskRunning(tasks, idOrPrefix, nowValue = new Date(), opti
 }
 
 function finishTaskAfterRun(task, now, ok, result) {
+	const remainDisabled = task.enabled === false;
 	delete task.runOwner;
 	task.runCount = (Number.isInteger(task.runCount) ? task.runCount : 0) + 1;
 	task.lastRun = now.toISOString();
@@ -641,6 +641,13 @@ function finishTaskAfterRun(task, now, ok, result) {
 		task.status = ok ? "fired" : "failed";
 		task.firedAt = ok ? now.toISOString() : task.firedAt;
 		task.failedAt = ok ? task.failedAt : now.toISOString();
+		task.nextRun = undefined;
+		return task;
+	}
+
+	if (remainDisabled) {
+		task.enabled = false;
+		task.status = "pending";
 		task.nextRun = undefined;
 		return task;
 	}
@@ -664,7 +671,11 @@ function markScheduledTaskCompleted(tasks, idOrPrefix, nowValue = new Date(), re
 	const now = asDate(nowValue);
 	const task = findTask(tasks, idOrPrefix);
 	if (!task) throw new Error(`Scheduled task not found: ${idOrPrefix}`);
-	if (task.status === "cancelled") return task;
+	if (task.status === "cancelled") {
+		delete task.runOwner;
+		delete task.startedAt;
+		return task;
+	}
 	return finishTaskAfterRun(task, now, options.ok !== false, result);
 }
 
