@@ -693,10 +693,21 @@ function markScheduledTaskFailed(tasks, idOrPrefix, nowValue = new Date(), error
 function recoverInterruptedTasks(tasks, nowValue = new Date(), options = {}) {
 	const now = asDate(nowValue);
 	const interrupted = tasks.filter(
-		(task) => task.enabled !== false && task.status === "running" && !options.isOwnerActive?.(task.runOwner),
+		(task) => task.status === "running" && !options.isOwnerActive?.(task.runOwner),
 	);
 	for (const task of interrupted) {
-		markScheduledTaskFailed(tasks, task.id, now, new Error("Scheduled task was interrupted before completion"));
+		const error = new Error("Scheduled task was interrupted before completion");
+		if (task.enabled === false) {
+			// Preserve an external disable decision while clearing the abandoned run.
+			task.status = "pending";
+			task.lastStatus = "error";
+			task.lastError = error.message;
+			task.nextRun = undefined;
+			delete task.runOwner;
+			delete task.startedAt;
+			continue;
+		}
+		markScheduledTaskFailed(tasks, task.id, now, error);
 	}
 	return interrupted;
 }

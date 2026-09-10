@@ -10,6 +10,7 @@ import { Type } from "typebox";
 // Keep the scheduler logic testable from plain node --test.
 const core = require("./scheduler-core.cjs");
 const lifecycle = require("./scheduler-lifecycle.cjs");
+const coordination = require("./scheduler-coordination.cjs");
 const { createTaskStore } = require("./task-store.cjs");
 
 const ACTIONS = ["notify", "prompt", "shell", "message"] as const;
@@ -133,10 +134,15 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 
 	async function loadTasks(): Promise<boolean> {
 		const snapshot = await store.read();
-		if (snapshot.revision <= stateRevision) return false;
-		tasks = snapshot.tasks;
-		stateRevision = snapshot.revision;
-		return true;
+		return coordination.reconcileSnapshot(
+			snapshot,
+			stateRevision,
+			(nextTasks: ScheduledTask[], revision: number) => {
+				tasks = nextTasks;
+				stateRevision = revision;
+			},
+			() => rescheduleAll(),
+		);
 	}
 
 	async function transactTasks<T>(mutator: (current: ScheduledTask[]) => T | Promise<T>): Promise<T> {
@@ -252,8 +258,7 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 		if (!ctx || refreshInFlight || !isSessionActive(ctx, generation)) return;
 		refreshInFlight = true;
 		try {
-			const changed = await loadTasks();
-			if (changed && isSessionActive(ctx, generation)) rescheduleAll(generation);
+			await loadTasks();
 		} finally {
 			refreshInFlight = false;
 		}
