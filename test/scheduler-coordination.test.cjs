@@ -6,7 +6,11 @@ const { mkdtemp, rm } = require("node:fs/promises");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const core = require("../extensions/scheduler/scheduler-core.cjs");
-const { reconcileSnapshot } = require("../extensions/scheduler/scheduler-coordination.cjs");
+const {
+	createRefreshLoop,
+	reconcileSnapshot,
+	refreshSchedulerState,
+} = require("../extensions/scheduler/scheduler-coordination.cjs");
 const { createTaskStore } = require("../extensions/scheduler/task-store.cjs");
 
 const NOW = new Date("2026-07-05T12:00:00.000Z");
@@ -48,6 +52,70 @@ test("listing a newly discovered external task also reconciles its timer", async
 
 	// A later periodic refresh sees no new revision, but the task is already armed.
 	assert.equal(reconcileSnapshot(await store.read(), revision, () => assert.fail("must not reinstall"), () => assert.fail("must not reconcile")), false);
+});
+
+test("a surviving process refresh recovers a dead owner and re-arms the recurring task", async (t) => {
+	const store = await temporaryStore(t);
+	await store.transact((tasks) => {
+		const task = core.createScheduledTask(
+			{ action: "notify", type: "interval", schedule: "1m", message: "shared", scope: "cwd", cwd: "/project" },
+			NOW,
+			() => "abandoned-running",
+		);
+		tasks.push(task);
+		core.markScheduledTaskRunning(tasks, task.id, NOW, { runOwner: { pid: 99999999, attemptId: "dead" } });
+	});
+
+	const initial = await store.read();
+	let revision = initial.revision;
+	let tasks = initial.tasks;
+	let intervalCallback;
+	let intervalDelay;
+	let cleared = false;
+	let unrefed = false;
+	const armed = [];
+
+	const loop = createRefreshLoop({
+		intervalMs: 5_000,
+		run: () =>
+			refreshSchedulerState({
+				store,
+				currentRevision: () => revision,
+				isOwnerActive: () => false,
+				recoverInterrupted: core.recoverInterruptedTasks,
+				now: () => new Date(NOW.getTime() + 2_000),
+				install: (nextTasks, nextRevision) => {
+					tasks = nextTasks;
+					revision = nextRevision;
+				},
+				reconcile: () => armed.push(...core.pendingTasks(tasks).map((task) => task.id)),
+			}),
+		setInterval: (callback, delay) => {
+			intervalCallback = callback;
+			intervalDelay = delay;
+			return { unref: () => (unrefed = true) };
+		},
+		clearInterval: () => (cleared = true),
+	});
+
+	loop.start(1);
+	assert.equal(intervalDelay, 5_000);
+	assert.equal(unrefed, true);
+	await intervalCallback();
+
+	assert.equal(revision, initial.revision + 1);
+	assert.equal(tasks[0].status, "pending");
+	assert.equal(tasks[0].runOwner, undefined);
+	assert.deepEqual(armed, ["abandoned-running"]);
+	assert.equal((await store.read()).tasks[0].status, "pending");
+
+	const recoveredRevision = revision;
+	await intervalCallback();
+	assert.equal(revision, recoveredRevision, "ordinary refreshes must not rewrite unchanged state");
+	assert.deepEqual(armed, ["abandoned-running"]);
+
+	loop.stop();
+	assert.equal(cleared, true);
 });
 
 test("recovery clears a dead owner while preserving a disabled recurring task", async (t) => {

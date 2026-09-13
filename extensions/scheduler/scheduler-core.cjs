@@ -686,6 +686,11 @@ function markScheduledTaskFired(tasks, idOrPrefix, nowValue = new Date(), result
 function markScheduledTaskFailed(tasks, idOrPrefix, nowValue = new Date(), error) {
 	const task = findTask(tasks, idOrPrefix);
 	if (!task) throw new Error(`Scheduled task not found: ${idOrPrefix}`);
+	if (task.status === "cancelled") {
+		delete task.runOwner;
+		delete task.startedAt;
+		return task;
+	}
 	task.lastError = error instanceof Error ? error.message : String(error);
 	return finishTaskAfterRun(task, asDate(nowValue), false, undefined);
 }

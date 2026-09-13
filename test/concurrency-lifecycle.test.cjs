@@ -37,3 +37,23 @@ test("completion of a cancelled in-flight task clears ownership", () => {
 	assert.equal(task.runOwner, undefined);
 	assert.equal(task.startedAt, undefined);
 });
+
+for (const type of ["once", "interval"]) {
+	test(`failure of a cancelled in-flight ${type} task preserves cancellation`, () => {
+		const task = core.createScheduledTask(
+			{ action: "shell", type, schedule: "1m", command: "false" },
+			NOW,
+			() => `task-cancel-failure-${type}`,
+		);
+		const tasks = [task];
+		core.markScheduledTaskRunning(tasks, task.id, NOW, { runOwner: { pid: 1, attemptId: "attempt" } });
+		core.cancelScheduledTask(tasks, task.id, new Date(NOW.getTime() + 1_000));
+		core.markScheduledTaskFailed(tasks, task.id, new Date(NOW.getTime() + 2_000), new Error("execution failed"));
+		assert.equal(task.enabled, false);
+		assert.equal(task.status, "cancelled");
+		assert.equal(task.runOwner, undefined);
+		assert.equal(task.startedAt, undefined);
+		assert.equal(task.runCount, 0);
+		assert.equal(task.lastError, undefined);
+	});
+}

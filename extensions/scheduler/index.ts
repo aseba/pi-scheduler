@@ -122,8 +122,6 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 	let activeCtx: ExtensionContext | undefined;
 	let sessionGeneration = 0;
 	let stateRevision = -1;
-	let refreshHandle: NodeJS.Timeout | undefined;
-	let refreshInFlight = false;
 	let widgetEnabled = true;
 	const firing = new Set<string>();
 	const store = createTaskStore({ stateFile: STATE_FILE, sanitize: core.sanitizeTasks });
@@ -255,23 +253,33 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 
 	async function refreshFromStore(generation = sessionGeneration): Promise<void> {
 		const ctx = activeCtx;
-		if (!ctx || refreshInFlight || !isSessionActive(ctx, generation)) return;
-		refreshInFlight = true;
-		try {
-			await loadTasks();
-		} finally {
-			refreshInFlight = false;
-		}
+		if (!ctx || !isSessionActive(ctx, generation)) return;
+		await coordination.refreshSchedulerState({
+			store,
+			currentRevision: () => stateRevision,
+			isOwnerActive: isRunOwnerActive,
+			recoverInterrupted: core.recoverInterruptedTasks,
+			now: () => new Date(),
+			install: (nextTasks: ScheduledTask[], revision: number) => {
+				tasks = nextTasks;
+				stateRevision = revision;
+			},
+			reconcile: () => rescheduleAll(generation),
+		});
 	}
 
+	const refreshLoop = coordination.createRefreshLoop({
+		intervalMs: STATE_REFRESH_INTERVAL_MS,
+		run: refreshFromStore,
+		onError: (error: any) => {
+			if (activeCtx?.hasUI) activeCtx.ui.notify(`Scheduler state refresh failed: ${error?.message ?? String(error)}`, "error");
+		},
+		setInterval,
+		clearInterval,
+	});
+
 	function startStateRefresh(generation: number): void {
-		if (refreshHandle) clearInterval(refreshHandle);
-		refreshHandle = setInterval(() => {
-			void refreshFromStore(generation).catch((error: any) => {
-				if (activeCtx?.hasUI) activeCtx.ui.notify(`Scheduler state refresh failed: ${error?.message ?? String(error)}`, "error");
-			});
-		}, STATE_REFRESH_INTERVAL_MS);
-		refreshHandle.unref?.();
+		refreshLoop.start(generation);
 	}
 
 	async function catchUpOverdueCronTasks(
@@ -538,8 +546,7 @@ export default function schedulerExtension(pi: ExtensionAPI) {
 	pi.on("session_shutdown", async (_event, ctx) => {
 		++sessionGeneration;
 		clearTimers();
-		if (refreshHandle) clearInterval(refreshHandle);
-		refreshHandle = undefined;
+		refreshLoop.stop();
 		if (ctx.hasUI) {
 			ctx.ui.setStatus("scheduler", undefined);
 			ctx.ui.setWidget("scheduler", undefined);
